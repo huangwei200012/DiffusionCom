@@ -1,8 +1,4 @@
-# Required environment variables:
-# model_name_or_path: pre-trained text model name ( bert-*)
-# checkpoint: the path of the pretrained model
-# batch_size: batch size (recommendation: 96)
-# lr: learning rate (recommendation: 4e-5)
+
 
 python main.py --gpus "0," --max_epochs=12  --num_workers=4 \
    --model_name_or_path  bert-base-uncased \

@@ -11,7 +11,6 @@ def lmap(f: Callable, x: Iterable) -> List:
     """list(map(f, x))"""
     return list(map(f, x))
 
-
 def multilabel_categorical_crossentropy(y_pred, y_true):
     y_pred = (1 - 2 * y_true) * y_pred
     y_pred_neg = y_pred - y_true * 1e12
@@ -30,7 +29,6 @@ class TransformerLitModel(BaseLitModel):
     def __init__(self, model, args, tokenizer=None, data_config={}):
         super().__init__(model, args)
         self.save_hyperparameters(args)
-        self.args = args
         if args.bce:
             self.loss_fn = nn.BCEWithLogitsLoss()
         elif args.label_smoothing != 0.0:
@@ -57,12 +55,17 @@ class TransformerLitModel(BaseLitModel):
 
     def training_step(self, batch, batch_idx):
         labels = batch.pop("labels")
-        label = batch.pop("label")
-        en = batch.pop("en")
         input_ids = batch['input_ids']
+        en = batch.pop("en")
+        # single label
+        label = batch.pop('label')  # bsz
+        
         en_list = en.to("cpu").tolist()
         indices_relation = [torch.nonzero(row == 1, as_tuple=False).squeeze(1).to("cpu").tolist() for row in labels]
         indices_relation = [list(set(i) & set(en_list)) for i in indices_relation]
+        new_indices_relation = []
+
+        
         indices_relation = [[x for x in indices_relation_sub if x != en_i] for indices_relation_sub,en_i in zip(indices_relation,en_list)]
         new_indices_relation = []
         for i in range(len(indices_relation)):
@@ -74,7 +77,6 @@ class TransformerLitModel(BaseLitModel):
                     new_indices_relation_sub.append(x)
             new_indices_relation.append(new_indices_relation_sub)
         indices_relation = new_indices_relation
-        
         # filtered_tensor = en[en != value]
         mapping = {en[i].item(): i for i in range(en.size(0))}
         map_function = lambda x: mapping.get(x, x)
@@ -91,21 +93,21 @@ class TransformerLitModel(BaseLitModel):
                 temp_tensor = torch.cat([temp_tensor,new_column],dim=-1)
         temp_tensor = temp_tensor.clone().cpu().apply_(map_function)
         temp_tensor = temp_tensor.to(en.device)
+
         # import pdb;pdb.set_trace()
         batch["edge_index"] = temp_tensor
-        outputs = self.model(**batch, return_dict=True)
-        mask_logits = outputs.logits
-        kl_loss = outputs.hidden_states
+        logits = self.model(**batch, return_dict=True).logits
+        
+        _, mask_idx = (input_ids == self.tokenizer.mask_token_id).nonzero(as_tuple=True)
+        bs = input_ids.shape[0]
+        # mask_logits = logits[torch.arange(bs), mask_idx][:, self.entity_id_st:self.entity_id_ed]
+        mask_logits = logits[:, self.entity_id_st:self.entity_id_ed]
+        assert mask_idx.shape[0] == bs, "only one mask in sequence!"
 
         if self.args.bce:
             loss = self.loss_fn(mask_logits, labels)
         else:
             loss = self.loss_fn(mask_logits, label)
-        
-        # import pdb;pdb.set_trace()
-        loss = loss + self.args.kl_loss*kl_loss
-        # loss = self.args.kl_loss*kl_loss
-        # print("使用kl_loss")
 
         if batch_idx == 0:
             print('\n'.join(self.decode(batch['input_ids'][:4])))
@@ -119,10 +121,13 @@ class TransformerLitModel(BaseLitModel):
         en = batch.pop("en")
         # single label
         label = batch.pop('label')  # bsz
-
+        
         en_list = en.to("cpu").tolist()
         indices_relation = [torch.nonzero(row == 1, as_tuple=False).squeeze(1).to("cpu").tolist() for row in labels]
         indices_relation = [list(set(i) & set(en_list)) for i in indices_relation]
+        
+
+
         indices_relation = [[x for x in indices_relation_sub if x != en_i] for indices_relation_sub,en_i in zip(indices_relation,en_list)]
         new_indices_relation = []
         for i in range(len(indices_relation)):
@@ -134,14 +139,18 @@ class TransformerLitModel(BaseLitModel):
                     new_indices_relation_sub.append(x)
             new_indices_relation.append(new_indices_relation_sub)
         indices_relation = new_indices_relation
+
+
         # filtered_tensor = en[en != value]
         mapping = {en[i].item(): i for i in range(en.size(0))}
         map_function = lambda x: mapping.get(x, x)
+        # import pdb;pdb.set_trace()
         # sub_edge_index, sub_edge_attr = subgraph(en, self.all_edge_index)
         # # 之差修改一下sub_edge_index
         # sub_edge_index = sub_edge_index.clone().cpu().apply_(map_function)
         # sub_edge_index = sub_edge_index.to(en.device)
         # 之后就是对repeated_indices进行一个遍历
+        # import pdb;pdb.set_trace()
         temp_tensor = torch.empty(2, 0,dtype=torch.int64).to(en.device)
         for i in range(len(indices_relation)):
             sub_indices_relation = indices_relation[i]
@@ -151,23 +160,22 @@ class TransformerLitModel(BaseLitModel):
         temp_tensor = temp_tensor.clone().cpu().apply_(map_function)
         temp_tensor = temp_tensor.to(en.device)
         batch["edge_index"] = temp_tensor
+        logits = self.model(**batch, return_dict=True).logits[ :, self.entity_id_st:self.entity_id_ed] # bsz, len, entites
 
+        _, mask_idx = (input_ids == self.tokenizer.mask_token_id).nonzero(as_tuple=True)    # bsz
         bsz = input_ids.shape[0]
+        # logits = logits[torch.arange(bsz), mask_idx] # bsz, entites
+        # get the entity ranks
+        # filter the entity
         assert labels[0][label[0]], "correct ids must in filiter!"
         labels[torch.arange(bsz), label] = 0
-        result_ranks = torch.empty(bsz, 0,dtype=torch.int64)
-        for i in range(20):
-            logits = self.model(**batch, return_dict=True).logits
-            assert logits.shape == labels.shape
-            logits += labels * -100 # mask entity
+        assert logits.shape == labels.shape
+        logits += labels * -100 # mask entity
 
-            _, outputs = torch.sort(logits, dim=1, descending=True) # bsz, entities   index
-            _, outputs = torch.sort(outputs, dim=1)
-            ranks = outputs[torch.arange(bsz), label].detach().cpu() + 1
-            ranks = ranks.unsqueeze(1)
-            result_ranks = torch.cat((result_ranks,ranks),dim=-1)
-        result_ranks_values = result_ranks.min(dim=-1).values
-        return dict(ranks = np.array(result_ranks_values))
+        _, outputs = torch.sort(logits, dim=1, descending=True) # bsz, entities   index
+        _, outputs = torch.sort(outputs, dim=1)
+        ranks = outputs[torch.arange(bsz), label].detach().cpu() + 1
+        return dict(ranks = np.array(ranks))
 
     def validation_step(self, batch, batch_idx):
         result = self._eval(batch, batch_idx)
@@ -196,7 +204,10 @@ class TransformerLitModel(BaseLitModel):
         self.log("Eval/mrr", (1. / ranks).mean())
         self.log("hits10", hits10, prog_bar=True)
         self.log("hits1", hits1, prog_bar=True)
-        self.log("mean_rank", ranks.mean(), prog_bar=True)
+        self.log("hits3", hits3, prog_bar=True)
+        self.log("Eval/mean_rank", ranks.mean(), prog_bar=True)
+        self.log("Eval/mrr", (1. / ranks).mean(), prog_bar=True)
+  
 
     def test_step(self, batch, batch_idx):
         result = self._eval(batch, batch_idx)
@@ -210,6 +221,8 @@ class TransformerLitModel(BaseLitModel):
         hits10 = (ranks<=10).mean()
         hits3 = (ranks<=3).mean()
         hits1 = (ranks<=1).mean()
+
+       
         self.log("Test/hits10", hits10)
         self.log("Test/hits20", hits20)
         self.log("Test/hits3", hits3)
@@ -226,10 +239,10 @@ class TransformerLitModel(BaseLitModel):
         ]
 
         optimizer = self.optimizer_class(optimizer_group_parameters, lr=self.lr, eps=1e-8)
-        if self.args.bce:
-            scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=self.num_training_steps * self.args.warm_up_radio, num_training_steps=self.num_training_steps)
-        else:
-            scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=self.num_training_steps * self.args.warm_up_radio, num_training_steps=self.num_training_steps)
+        # if self.args.bce:
+        #     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=self.num_training_steps * self.args.warm_up_radio, num_training_steps=self.num_training_steps)
+        # else:
+        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=self.num_training_steps * self.args.warm_up_radio, num_training_steps=self.num_training_steps)
         return {
             "optimizer": optimizer, 
             "lr_scheduler":{
