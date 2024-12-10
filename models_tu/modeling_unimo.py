@@ -1,6 +1,7 @@
 from typing import Any, Optional, Tuple
 import math
 
+
 import torch
 from torch import nn, Tensor, device
 from torch.nn import CrossEntropyLoss
@@ -32,41 +33,27 @@ class GAT(nn.Module):
         x = self.conv2(x, edge_index)
         return x
 
-# class GCNEncoder(nn.Module):
-#     def __init__(self, in_channels, hidden_channels, out_channels):
-#         super(GCNEncoder, self).__init__()
-#         # 定义两层GCN卷积层
-#         self.conv1 = GCNConv(in_channels, hidden_channels)
-#         self.conv2 = GCNConv(hidden_channels, out_channels)
 
-#     def forward(self, x, edge_index):
-#         # 第一层卷积，并使用ReLU激活函数
-#         x = self.conv1(x, edge_index)
-#         x = F.relu(x)
-#         # 第二层卷积，输出最终的编码向量
-#         x = self.conv2(x, edge_index)
-#         return x
 class GCNEncoder(nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers):
         super(GCNEncoder, self).__init__()
         self.num_layers = num_layers
 
-        # 创建第一层卷积
+
         self.convs = nn.ModuleList()
         self.convs.append(GCNConv(in_channels, hidden_channels))
 
-        # 创建中间层卷积
         for _ in range(num_layers - 2):
             self.convs.append(GCNConv(hidden_channels, hidden_channels))
 
-        # 创建最后一层卷积
+
         self.convs.append(GCNConv(hidden_channels, out_channels))
 
     def forward(self, x, edge_index):
-        # 逐层应用GCN卷积，并使用ReLU激活函数
+
         for i, conv in enumerate(self.convs):
             x = conv(x, edge_index)
-            if i < self.num_layers - 1:  # 在最后一层之前使用ReLU激活
+            if i < self.num_layers - 1: 
                 x = F.relu(x)
         return x
 # some function

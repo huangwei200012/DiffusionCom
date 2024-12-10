@@ -1,22 +1,61 @@
 from typing import Any, Optional, Tuple
 import math
 
+
 import torch
 from torch import nn, Tensor, device
 from torch.nn import CrossEntropyLoss
-
+from torch_geometric.nn import GATConv,GCNConv
 from transformers.activations import ACT2FN
 from transformers.modeling_utils import (
     PreTrainedModel,
     apply_chunking_to_forward,
 )
+import torch.nn.functional as F
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import (
     BaseModelOutput, 
     MaskedLMOutput,
     BaseModelOutputWithPooling,
 )
+class GAT(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_heads, dropout=0.6):
+        super(GAT, self).__init__()
+        self.conv1 = GATConv(in_channels, hidden_channels, heads=num_heads, concat=True)
+        self.conv2 = GATConv(hidden_channels * num_heads, out_channels, heads=num_heads, concat=False)
+        self.dropout = dropout
 
+    def forward(self, x, edge_index):
+        # x: node features, edge_index: graph connectivity
+        x = self.conv1(x, edge_index)
+        x = F.elu(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)  # Add dropout for regularization
+        x = self.conv2(x, edge_index)
+        return x
+
+
+class GCNEncoder(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers):
+        super(GCNEncoder, self).__init__()
+        self.num_layers = num_layers
+
+
+        self.convs = nn.ModuleList()
+        self.convs.append(GCNConv(in_channels, hidden_channels))
+
+        for _ in range(num_layers - 2):
+            self.convs.append(GCNConv(hidden_channels, hidden_channels))
+
+
+        self.convs.append(GCNConv(hidden_channels, out_channels))
+
+    def forward(self, x, edge_index):
+
+        for i, conv in enumerate(self.convs):
+            x = conv(x, edge_index)
+            if i < self.num_layers - 1: 
+                x = F.relu(x)
+        return x
 # some function
 def get_extended_attention_mask(attention_mask: Tensor, input_shape: Tuple[int], device: device) -> Tensor:
         """
@@ -598,32 +637,32 @@ class UnimoEncoder(nn.Module):
     ):
         assert self.vision_config.num_hidden_layers == self.text_config.num_hidden_layers
 
-        # all_vision_hidden_states = () if output_hidden_states else None
+        all_vision_hidden_states = () if output_hidden_states else None
         all_text_hidden_states = () if output_hidden_states else None
-        # all_vision_attentions = () if output_attentions else None
+        all_vision_attentions = () if output_attentions else None
         all_text_attentions = () if output_attentions else None
         
-        # vision_hidden_states = vision_embeds
+        vision_hidden_states = vision_embeds
         text_hidden_states = text_embeds
         for idx in range(self.vision_config.num_hidden_layers):
             if output_hidden_states:
-                # all_vision_hidden_states = all_vision_hidden_states + (vision_hidden_states, )
+                all_vision_hidden_states = all_vision_hidden_states + (vision_hidden_states, )
                 all_text_hidden_states = all_text_hidden_states + (text_hidden_states, )
             
-            # # vision
-            # # TODO: 9-12 layers past text as pkv to vision
-            # past_key_values = text_layer_output[-1] if idx >= 8 else None
-            # vision_layer_module = self.vision_layers[idx]
-            # vision_layer_output = vision_layer_module(
-            #         vision_hidden_states,
-            #         output_attentions=output_attentions,
-            #         past_key_values=past_key_values,
-            # )
-            # vision_hidden_states = vision_layer_output[0]
+            # vision
+            # TODO: 9-12 layers past text as pkv to vision
+            past_key_values = text_layer_output[-1] if idx >= 8 else None
+            vision_layer_module = self.vision_layers[idx]
+            vision_layer_output = vision_layer_module(
+                    vision_hidden_states,
+                    output_attentions=output_attentions,
+                    past_key_values=past_key_values,
+            )
+            vision_hidden_states = vision_layer_output[0]
 
             # text
             # TODO: 9-12 layers past vison qks to text
-            # last_hidden_state = vision_hidden_states if idx >= 8 else None
+            last_hidden_state = vision_hidden_states if idx >= 8 else None
             output_qks = True if idx >= 7 else None
             layer_head_mask = head_mask[idx] if head_mask is not None else None
             text_layer_module = self.text_layer[idx]
@@ -631,17 +670,17 @@ class UnimoEncoder(nn.Module):
                     text_hidden_states,
                     attention_mask=attention_mask,
                     head_mask=layer_head_mask,
-                    # visual_hidden_state=last_hidden_state,
+                    visual_hidden_state=last_hidden_state,
                     output_attentions=output_attentions,
                     output_qks=output_qks,
             )
             text_hidden_states = text_layer_output[0]
             if output_attentions:
-                # all_vision_attentions = all_vision_attentions + (vision_layer_output[1], )
+                all_vision_attentions = all_vision_attentions + (vision_layer_output[1], )
                 all_text_attentions = all_text_attentions + (text_layer_output[1], )
         
         if output_hidden_states:
-                # all_vision_hidden_states = all_vision_hidden_states + (vision_hidden_states, )
+                all_vision_hidden_states = all_vision_hidden_states + (vision_hidden_states, )
                 all_text_hidden_states = all_text_hidden_states + (text_hidden_states, )
         
         if not return_dict:
@@ -675,12 +714,12 @@ class UnimoModel(nn.Module):
     def __init__(self, vision_config, text_config, add_pooling_layer=True):
         super(UnimoModel, self).__init__()
         # vision model
-#         self.vision_config = vision_config
-#         self.vision_embeddings = CLIPVisionEmbeddings(vision_config)
-#         self.vision_pre_layrnorm = nn.LayerNorm(vision_config.hidden_size)
-#         self.vision_post_layernorm = nn.LayerNorm(vision_config.hidden_size)
+        self.vision_config = vision_config
+        self.vision_embeddings = CLIPVisionEmbeddings(vision_config)
+        self.vision_pre_layrnorm = nn.LayerNorm(vision_config.hidden_size)
+        self.vision_post_layernorm = nn.LayerNorm(vision_config.hidden_size)
 
-#         # text model
+        # text model
         self.text_config = text_config
         self.text_embeddings = BertEmbeddings(text_config)
         self.text_pooler = BertPooler(text_config) if add_pooling_layer else None
@@ -697,6 +736,7 @@ class UnimoModel(nn.Module):
         token_type_ids=None,
         position_ids=None,
         head_mask=None,
+        
         pixel_values=None,
         aux_values=None, 
         rcnn_values=None,
@@ -705,8 +745,8 @@ class UnimoModel(nn.Module):
         return_dict=None,
     ):
         # pre vision
-        # vision_embedding_output = self.vision_embeddings(pixel_values, aux_values, rcnn_values)
-        # vision_embedding_output = self.vision_pre_layrnorm(vision_embedding_output)
+        vision_embedding_output = self.vision_embeddings(pixel_values, aux_values, rcnn_values)
+        vision_embedding_output = self.vision_pre_layrnorm(vision_embedding_output)
 
         # pre text
         input_shape = input_ids.size()
@@ -734,7 +774,7 @@ class UnimoModel(nn.Module):
 
         # all encoder
         encoder_outputs = self.encoder(
-            vision_embeds=None,
+            vision_embeds=vision_embedding_output,
             text_embeds=text_embedding_output,
             attention_mask=extended_attention_mask,
             output_attentions=output_attentions,
@@ -834,12 +874,13 @@ class UnimoModel(nn.Module):
 
         
 class UnimoForMaskedLM(nn.Module):
-    def __init__(self, vision_config, text_config):
+    def __init__(self, vision_config, text_config,num_layers):
         super().__init__()
         self.unimo = UnimoModel(vision_config, text_config)
         self.cls = UnimoOnlyMLMHead(text_config)
         self.config = text_config
-
+        # self.gat_net = GAT(768,1536,768,2,0.2)
+        self.gat_net = GCNEncoder(768,1536,768,num_layers)
         self.tie_weights()
 
     def forward(
@@ -849,7 +890,7 @@ class UnimoForMaskedLM(nn.Module):
         token_type_ids=None,
         position_ids=None,
         head_mask=None,
-        
+        edge_index=None,
         pixel_values=None,
         aux_values=None, 
         rcnn_values=None,
@@ -873,8 +914,14 @@ class UnimoForMaskedLM(nn.Module):
         )
 
         sequence_output = outputs[0]
-        prediction_scores = self.cls(sequence_output)
+        _, mask_idx = (input_ids == 103).nonzero(as_tuple=True)
+        bs = input_ids.shape[0]
+        mask_sequence_output = sequence_output[torch.arange(bs), mask_idx]
+        gat_mask_sequence_output = self.gat_net(mask_sequence_output,edge_index) 
+        mask_sequence_output = 0.5*gat_mask_sequence_output + 0.5*mask_sequence_output
+        prediction_scores = self.cls(mask_sequence_output)
 
+        # prediction_scores = prediction_scores[:,30522:45473]
         masked_lm_loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss()  # -100 index = padding token

@@ -1,6 +1,7 @@
 from .modeling_unimo import UnimoForMaskedLM
 
 
+
 class UnimoKGC(UnimoForMaskedLM):
     @staticmethod
     def add_to_argparse(parser):
